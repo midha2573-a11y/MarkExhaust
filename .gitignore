@@ -6,3 +6,5 @@ products.json
 submissions.json
 *.xls
 *.xlsx
+.vercel
+.env*

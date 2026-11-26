@@ -4,6 +4,7 @@ const crypto = require("node:crypto");
 const { MongoClient } = require("mongodb");
 
 let clientPromise;
+let mongoClient;
 
 async function connectToMongo() {
   const uri = process.env.MONGODB_URI;
@@ -12,13 +13,26 @@ async function connectToMongo() {
   if (!clientPromise) {
     const client = new MongoClient(uri);
     clientPromise = client.connect()
-      .then(() => client.db(process.env.MONGODB_DB || "markexhaust"))
+      .then(() => {
+        mongoClient = client;
+        return client.db(process.env.MONGODB_DB || "markexhaust");
+      })
       .catch(error => {
         clientPromise = null;
+        client.close().catch(() => {});
         throw error;
       });
   }
   return clientPromise;
+}
+
+async function closeMongo() {
+  if (!clientPromise) return;
+  await clientPromise;
+  const client = mongoClient;
+  clientPromise = null;
+  mongoClient = null;
+  if (client) await client.close();
 }
 
 async function createMongoStores(database) {
@@ -58,4 +72,4 @@ function hashToken(token) {
   return crypto.createHash("sha256").update(token).digest("hex");
 }
 
-module.exports = { connectToMongo, createMongoStores };
+module.exports = { connectToMongo, createMongoStores, closeMongo };

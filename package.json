@@ -7,9 +7,13 @@
   },
   "scripts": {
     "start": "node server.js",
+    "import:master-data": "node scripts/import-master-data.js",
     "test": "node --test"
   },
   "dependencies": {
     "mongodb": "^6.10.0"
+  },
+  "devDependencies": {
+    "dotenv": "^18.0.10"
   }
 }

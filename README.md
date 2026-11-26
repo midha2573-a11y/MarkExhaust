@@ -30,9 +30,10 @@ This project now uses the Node.js backend; the former PowerShell server has been
 
 The Vercel API function reads master data from MongoDB and stores orders in the `submissions` collection. Admin sessions are stored in `admin_sessions` with an expiry index. Before deploying:
 
-1. In MongoDB Atlas, create a database user with read/write access to the `markexhaust` database. Configure Atlas Network Access to allow connections from your deployment.
-2. Import the private party and product records into `markexhaust.parties` and `markexhaust.products`. Each collection should contain one document per row from the corresponding JSON array, with the existing field names unchanged. Do not commit these private files.
+1. In MongoDB Atlas, create a database user with read/write access to the `markexhaust` database.
+2. Put `MONGODB_URI` in the ignored `.env.local` file, then allow the computer running the import command in Atlas Network Access. From the project folder run `npm.cmd run import:master-data`. This validates the local JSON files and upserts records into `parties` and `products` by their party code and part number; it does not delete other records. Do not commit these private files.
 3. In the Vercel project settings, add `MONGODB_URI` using the connection string from Atlas (replace `<db_password>` with the real password; URL-encode special characters), `MONGODB_DB` set to `markexhaust`, and `PARTY_ADMIN_PASSWORD` set to a unique password of at least 12 characters. Add them for the production environment (and preview too, if needed).
-4. Deploy the project from its linked GitHub repository. The `/admin` route is rewritten to the admin page; order and admin APIs run as a Vercel function.
+4. Configure Atlas Network Access for the Vercel deployment's outbound IP. Vercel Static IPs require a Pro or Enterprise plan; see the Vercel networking documentation before enabling them. Do not use `0.0.0.0/0` for live data.
+5. Deploy the project from its linked GitHub repository. The `/admin` route is rewritten to the admin page; order and admin APIs run as a Vercel function.
 
 Do not paste the real connection string or database password into chat or source files. A deployment without the environment variables and both master-data collections will return a service-unavailable error rather than accepting orders.
