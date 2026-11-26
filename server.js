@@ -94,6 +94,10 @@ async function loadMasterData(directory = __dirname) {
     throw error;
   }
 
+  return validateMasterData(partyRows, productRows);
+}
+
+function validateMasterData(partyRows, productRows) {
   const parties = normalizeRows(partyRows, PARTY_FIELDS, "Party data", true);
   const partyCodes = new Set();
   for (const party of parties) {
@@ -176,15 +180,38 @@ function safeEqual(left, right) {
   return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
 }
 
-function createApplication({ parties, products, submissionsPath, password, username = "admin", webRoot = __dirname }) {
+function createApplication({
+  parties,
+  products,
+  submissionsPath,
+  submissionStore,
+  sessionStore,
+  password,
+  username = "admin",
+  webRoot = __dirname
+}) {
   if (!Array.isArray(parties) || !Array.isArray(products)) {
     throw new Error("Party and product records are required.");
   }
   if (typeof password !== "string" || !password.trim() || password.length < 12) {
     throw new Error("Use an admin password with at least 12 characters.");
   }
-  if (typeof submissionsPath !== "string" || !submissionsPath) {
-    throw new Error("A submissions file path is required.");
+  if (
+    submissionStore &&
+    (typeof submissionStore.append !== "function" || typeof submissionStore.list !== "function")
+  ) {
+    throw new Error("The submissions store must provide append and list functions.");
+  }
+  if (!submissionStore && (typeof submissionsPath !== "string" || !submissionsPath)) {
+    throw new Error("A submissions file path or store is required.");
+  }
+  if (
+    sessionStore &&
+    (typeof sessionStore.get !== "function" ||
+      typeof sessionStore.set !== "function" ||
+      typeof sessionStore.delete !== "function")
+  ) {
+    throw new Error("The session store must provide get, set, and delete functions.");
   }
 
   const partyByCode = new Map(parties.map(party => [party["party code"], party]));
@@ -195,6 +222,8 @@ function createApplication({ parties, products, submissionsPath, password, usern
   let writeQueue = Promise.resolve();
 
   async function readSubmissions() {
+    if (submissionStore) return submissionStore.list();
+
     let content;
     try {
       content = await fs.readFile(submissionsPath, "utf8");
@@ -229,6 +258,8 @@ function createApplication({ parties, products, submissionsPath, password, usern
   }
 
   function appendSubmission(submission) {
+    if (submissionStore) return submissionStore.append(submission);
+
     const operation = writeQueue.then(async () => {
       const items = await readSubmissions();
       items.push(submission);
@@ -250,12 +281,13 @@ function createApplication({ parties, products, submissionsPath, password, usern
     return process.env.NODE_ENV === "production" || forwardedProto === "https";
   }
 
-  function getValidSession(request) {
+  async function getValidSession(request) {
     const token = readCookie(request, "admin_session");
     if (!token) return null;
-    const expiresAt = sessions.get(token);
+    const expiresAt = sessionStore ? await sessionStore.get(token) : sessions.get(token);
     if (!expiresAt || expiresAt <= Date.now()) {
-      sessions.delete(token);
+      if (sessionStore) await sessionStore.delete(token);
+      else sessions.delete(token);
       return null;
     }
     return token;
@@ -276,8 +308,10 @@ function createApplication({ parties, products, submissionsPath, password, usern
       const route = requestUrl.pathname;
       const method = request.method || "GET";
 
-      for (const [token, expiresAt] of sessions) {
-        if (expiresAt <= Date.now()) sessions.delete(token);
+      if (!sessionStore) {
+        for (const [token, expiresAt] of sessions) {
+          if (expiresAt <= Date.now()) sessions.delete(token);
+        }
       }
 
       if (method === "GET" && (route === "/" || route === "/admin")) {
@@ -424,7 +458,9 @@ function createApplication({ parties, products, submissionsPath, password, usern
         }
 
         const token = crypto.randomBytes(32).toString("base64url");
-        sessions.set(token, Date.now() + SESSION_TTL_MS);
+        const expiresAt = Date.now() + SESSION_TTL_MS;
+        if (sessionStore) await sessionStore.set(token, expiresAt);
+        else sessions.set(token, expiresAt);
         const secureAttribute = isSecureRequest(request) ? "; Secure" : "";
         sendJson(response, 200, { message: "Signed in." }, {
           "Set-Cookie": `admin_session=${token}; Path=/api/admin; HttpOnly; SameSite=Strict; Max-Age=28800${secureAttribute}`
@@ -433,12 +469,12 @@ function createApplication({ parties, products, submissionsPath, password, usern
       }
 
       if (method === "GET" && route === "/api/admin/session") {
-        sendJson(response, 200, { authenticated: Boolean(getValidSession(request)) });
+        sendJson(response, 200, { authenticated: Boolean(await getValidSession(request)) });
         return;
       }
 
       if (route.startsWith("/api/admin/")) {
-        const token = getValidSession(request);
+        const token = await getValidSession(request);
         if (!token) {
           clearSessionCookie(request, response);
           sendJson(response, 401, { error: "Admin sign-in required." });
@@ -451,7 +487,8 @@ function createApplication({ parties, products, submissionsPath, password, usern
         }
 
         if (method === "POST" && route === "/api/admin/logout") {
-          sessions.delete(token);
+          if (sessionStore) await sessionStore.delete(token);
+          else sessions.delete(token);
           clearSessionCookie(request, response);
           sendJson(response, 200, { message: "Signed out." });
           return;
@@ -531,10 +568,19 @@ async function start() {
   }
 
   const { parties, products } = await loadMasterData();
+  let submissionStore;
+  let sessionStore;
+  if (process.env.MONGODB_URI) {
+    const { connectToMongo, createMongoStores } = require("./mongo-storage");
+    const database = await connectToMongo();
+    ({ submissionStore, sessionStore } = await createMongoStores(database));
+  }
   const handler = createApplication({
     parties,
     products,
     submissionsPath: path.join(__dirname, "submissions.json"),
+    submissionStore,
+    sessionStore,
     password
   });
   password = "";
@@ -549,7 +595,11 @@ async function start() {
   server.listen(port, host, () => {
     console.log(`Party form running at http://${host}:${port}/`);
     console.log(`Admin panel: http://${host}:${port}/admin`);
-    console.log("Press Ctrl+C to stop the server. Submissions are saved in submissions.json.");
+    console.log(
+      process.env.MONGODB_URI
+        ? "Press Ctrl+C to stop the server. Submissions are saved in MongoDB."
+        : "Press Ctrl+C to stop the server. Submissions are saved in submissions.json."
+    );
   });
 }
 
@@ -560,4 +610,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createApplication, loadMasterData };
+module.exports = { createApplication, loadMasterData, validateMasterData };

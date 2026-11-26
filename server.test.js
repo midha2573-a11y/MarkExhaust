@@ -31,14 +31,15 @@ const products = [{
   "td price": 85
 }];
 
-async function createTestServer(t, productRows = products, partyRows = parties) {
+async function createTestServer(t, productRows = products, partyRows = parties, stores = {}) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "form-markexhaust-"));
   const submissionsPath = path.join(directory, "submissions.json");
   const server = http.createServer(createApplication({
     parties: partyRows,
     products: productRows,
-    submissionsPath,
-    password: "test-password-123"
+    password: "test-password-123",
+    ...stores,
+    ...(stores.submissionStore ? {} : { submissionsPath })
   }));
   await new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -162,6 +163,55 @@ test("submissions require standard-pack multiples and persist server-validated p
   assert.equal(saved.products[0]["standard pack"], 6);
   assert.equal(saved.products[0].quantity, 12);
   assert.ok(Number.isFinite(Date.parse(saved["submitted at"])));
+});
+
+test("injected submission and session stores persist orders and admin sessions", async t => {
+  const saved = [];
+  const storedSessions = new Map();
+  const { baseUrl } = await createTestServer(t, products, parties, {
+    submissionStore: {
+      async append(submission) {
+        saved.push(submission);
+      },
+      async list() {
+        return saved;
+      }
+    },
+    sessionStore: {
+      async get(token) {
+        return storedSessions.get(token) || null;
+      },
+      async set(token, expiresAt) {
+        storedSessions.set(token, expiresAt);
+      },
+      async delete(token) {
+        storedSessions.delete(token);
+      }
+    }
+  });
+
+  const submissionResponse = await fetch(`${baseUrl}/api/submissions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      "party code": "P-1",
+      products: [{ "part number": "PART-1", quantity: 6 }]
+    })
+  });
+  assert.equal(submissionResponse.status, 201);
+  assert.equal(saved.length, 1);
+
+  const login = await fetch(`${baseUrl}/api/admin/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username: "admin", password: "test-password-123" })
+  });
+  const cookie = login.headers.get("set-cookie").split(";")[0];
+  const authorized = await fetch(`${baseUrl}/api/admin/submissions`, {
+    headers: { Cookie: cookie }
+  });
+  assert.equal(authorized.status, 200);
+  assert.equal((await authorized.json()).length, 1);
 });
 
 test("admin submissions require a session", async t => {
