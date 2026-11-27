@@ -2,8 +2,8 @@
 
 const crypto = require("node:crypto");
 const fs = require("node:fs/promises");
-const http = require("node:http");
 const path = require("node:path");
+const express = require("express");
 
 const PARTY_FIELDS = [
   "party code",
@@ -131,35 +131,11 @@ function validateMasterData(partyRows, productRows) {
   return { parties, products };
 }
 
-async function readJsonBody(request) {
-  const contentLength = Number(request.headers["content-length"]);
-  if (Number.isFinite(contentLength) && contentLength > MAX_REQUEST_BYTES) {
-    throw new HttpError(413, "Request is too large.");
-  }
-
-  const chunks = [];
-  let size = 0;
-  for await (const chunk of request) {
-    size += chunk.length;
-    if (size > MAX_REQUEST_BYTES) throw new HttpError(413, "Request is too large.");
-    chunks.push(chunk);
-  }
-
-  if (size === 0) throw new HttpError(400, "Request body is required.");
-  try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
-  } catch {
-    throw new HttpError(400, "Invalid request.");
-  }
-}
-
 function sendJson(response, statusCode, value, headers = {}) {
-  response.writeHead(statusCode, {
+  response.status(statusCode).set({
     "Cache-Control": "no-store",
-    "Content-Type": "application/json; charset=utf-8",
     ...headers
-  });
-  response.end(JSON.stringify(value));
+  }).json(value);
 }
 
 function readCookie(request, name) {
@@ -184,8 +160,6 @@ function createApplication({
   parties,
   products,
   submissionsPath,
-  submissionStore,
-  sessionStore,
   password,
   username = "admin",
   webRoot = __dirname
@@ -196,22 +170,8 @@ function createApplication({
   if (typeof password !== "string" || !password.trim() || password.length < 12) {
     throw new Error("Use an admin password with at least 12 characters.");
   }
-  if (
-    submissionStore &&
-    (typeof submissionStore.append !== "function" || typeof submissionStore.list !== "function")
-  ) {
-    throw new Error("The submissions store must provide append and list functions.");
-  }
-  if (!submissionStore && (typeof submissionsPath !== "string" || !submissionsPath)) {
-    throw new Error("A submissions file path or store is required.");
-  }
-  if (
-    sessionStore &&
-    (typeof sessionStore.get !== "function" ||
-      typeof sessionStore.set !== "function" ||
-      typeof sessionStore.delete !== "function")
-  ) {
-    throw new Error("The session store must provide get, set, and delete functions.");
+  if (typeof submissionsPath !== "string" || !submissionsPath) {
+    throw new Error("A submissions file path is required.");
   }
 
   const partyByCode = new Map(parties.map(party => [party["party code"], party]));
@@ -222,8 +182,6 @@ function createApplication({
   let writeQueue = Promise.resolve();
 
   async function readSubmissions() {
-    if (submissionStore) return submissionStore.list();
-
     let content;
     try {
       content = await fs.readFile(submissionsPath, "utf8");
@@ -258,8 +216,6 @@ function createApplication({
   }
 
   function appendSubmission(submission) {
-    if (submissionStore) return submissionStore.append(submission);
-
     const operation = writeQueue.then(async () => {
       const items = await readSubmissions();
       items.push(submission);
@@ -284,34 +240,33 @@ function createApplication({
   async function getValidSession(request) {
     const token = readCookie(request, "admin_session");
     if (!token) return null;
-    const expiresAt = sessionStore ? await sessionStore.get(token) : sessions.get(token);
+    const expiresAt = sessions.get(token);
     if (!expiresAt || expiresAt <= Date.now()) {
-      if (sessionStore) await sessionStore.delete(token);
-      else sessions.delete(token);
+      sessions.delete(token);
       return null;
     }
     return token;
   }
 
-  async function serveFile(response, filename) {
-    const body = await fs.readFile(path.join(webRoot, filename));
-    response.writeHead(200, {
-      "Cache-Control": "no-store",
-      "Content-Type": "text/html; charset=utf-8"
+  function serveFile(response, filename) {
+    return new Promise((resolve, reject) => {
+      response.sendFile(path.join(webRoot, filename), {
+        headers: { "Cache-Control": "no-store" }
+      }, error => {
+        if (error) reject(error);
+        else resolve();
+      });
     });
-    response.end(body);
   }
 
-  return async function handleRequest(request, response) {
+  async function handleRequest(request, response) {
     try {
       const requestUrl = new URL(request.url || "/", "http://localhost");
       const route = requestUrl.pathname;
       const method = request.method || "GET";
 
-      if (!sessionStore) {
-        for (const [token, expiresAt] of sessions) {
-          if (expiresAt <= Date.now()) sessions.delete(token);
-        }
+      for (const [token, expiresAt] of sessions) {
+        if (expiresAt <= Date.now()) sessions.delete(token);
       }
 
       if (method === "GET" && (route === "/" || route === "/admin")) {
@@ -375,7 +330,8 @@ function createApplication({
       }
 
       if (method === "POST" && route === "/api/submissions") {
-        const payload = await readJsonBody(request);
+        const payload = request.body;
+        if (payload === undefined) throw new HttpError(400, "Request body is required.");
         if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
           throw new HttpError(400, "Invalid request.");
         }
@@ -449,7 +405,8 @@ function createApplication({
       }
 
       if (method === "POST" && route === "/api/admin/login") {
-        const payload = await readJsonBody(request);
+        const payload = request.body;
+        if (payload === undefined) throw new HttpError(400, "Request body is required.");
         const providedUsername = String(payload?.username ?? "");
         const providedPassword = String(payload?.password ?? "");
         if (providedUsername !== username || !safeEqual(providedPassword, password)) {
@@ -458,9 +415,7 @@ function createApplication({
         }
 
         const token = crypto.randomBytes(32).toString("base64url");
-        const expiresAt = Date.now() + SESSION_TTL_MS;
-        if (sessionStore) await sessionStore.set(token, expiresAt);
-        else sessions.set(token, expiresAt);
+        sessions.set(token, Date.now() + SESSION_TTL_MS);
         const secureAttribute = isSecureRequest(request) ? "; Secure" : "";
         sendJson(response, 200, { message: "Signed in." }, {
           "Set-Cookie": `admin_session=${token}; Path=/api/admin; HttpOnly; SameSite=Strict; Max-Age=28800${secureAttribute}`
@@ -487,8 +442,7 @@ function createApplication({
         }
 
         if (method === "POST" && route === "/api/admin/logout") {
-          if (sessionStore) await sessionStore.delete(token);
-          else sessions.delete(token);
+          sessions.delete(token);
           clearSessionCookie(request, response);
           sendJson(response, 200, { message: "Signed out." });
           return;
@@ -504,7 +458,24 @@ function createApplication({
       console.error("Request failed:", error);
       sendJson(response, 500, { error: "Server error." });
     }
-  };
+  }
+
+  const app = express();
+  app.disable("x-powered-by");
+  app.use(express.json({ limit: MAX_REQUEST_BYTES, type: "*/*" }));
+  app.use((error, request, response, next) => {
+    if (error.type === "entity.too.large") {
+      sendJson(response, 413, { error: "Request is too large." });
+      return;
+    }
+    if (error instanceof SyntaxError && error.status === 400) {
+      sendJson(response, 400, { error: "Invalid request." });
+      return;
+    }
+    next(error);
+  });
+  app.use(handleRequest);
+  return app;
 }
 
 async function promptForPassword() {
@@ -568,19 +539,10 @@ async function start() {
   }
 
   const { parties, products } = await loadMasterData();
-  let submissionStore;
-  let sessionStore;
-  if (process.env.MONGODB_URI) {
-    const { connectToMongo, createMongoStores } = require("./mongo-storage");
-    const database = await connectToMongo();
-    ({ submissionStore, sessionStore } = await createMongoStores(database));
-  }
   const handler = createApplication({
     parties,
     products,
     submissionsPath: path.join(__dirname, "submissions.json"),
-    submissionStore,
-    sessionStore,
     password
   });
   password = "";
@@ -591,15 +553,10 @@ async function start() {
     throw new Error("PORT must be a valid TCP port.");
   }
 
-  const server = http.createServer(handler);
-  server.listen(port, host, () => {
+  handler.listen(port, host, () => {
     console.log(`Party form running at http://${host}:${port}/`);
     console.log(`Admin panel: http://${host}:${port}/admin`);
-    console.log(
-      process.env.MONGODB_URI
-        ? "Press Ctrl+C to stop the server. Submissions are saved in MongoDB."
-        : "Press Ctrl+C to stop the server. Submissions are saved in submissions.json."
-    );
+    console.log("Press Ctrl+C to stop the server. Submissions are saved in submissions.json.");
   });
 }
 
