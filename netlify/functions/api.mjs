@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { getStore } from "@netlify/blobs";
-import serverModule from "../../server.js";
+import coreModule from "../../app-core.js";
 
 const {
   hasAvailablePartyZone,
@@ -10,7 +10,7 @@ const {
   partyAccessError,
   safeEqual,
   validateMasterData
-} = serverModule;
+} = coreModule;
 
 const STORE_NAME = "markexhaust-data";
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
