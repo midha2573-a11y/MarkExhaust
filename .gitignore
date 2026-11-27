@@ -7,4 +7,6 @@ submissions.json
 *.xls
 *.xlsx
 .vercel
+.netlify/
 .env*
+public/

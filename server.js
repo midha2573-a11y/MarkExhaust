@@ -567,4 +567,14 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createApplication, loadMasterData, validateMasterData };
+module.exports = {
+  createApplication,
+  hasAvailablePartyZone,
+  loadMasterData,
+  MAX_PRODUCT_RESULTS,
+  MAX_REQUEST_BYTES,
+  PARTY_FIELDS,
+  partyAccessError,
+  safeEqual,
+  validateMasterData
+};

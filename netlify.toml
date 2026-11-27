@@ -1,0 +1,12 @@
+[build]
+  command = "node scripts/prepare-netlify-public.js"
+  publish = "public"
+  functions = "netlify/functions"
+
+[functions]
+  node_bundler = "esbuild"
+
+[[redirects]]
+  from = "/admin"
+  to = "/admin.html"
+  status = 200
